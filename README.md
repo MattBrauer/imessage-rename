@@ -6,6 +6,61 @@ Files that already have a human-readable name (e.g. `Belize! - 769.html`, `Da li
 
 ---
 
+## Prerequisites: imessage-exporter
+
+This script operates on HTML output from [imessage-exporter](https://github.com/ReagentX/imessage-exporter), a command-line tool that exports iMessage and SMS conversations from macOS or iOS backups.
+
+### Installing imessage-exporter
+
+**Via Homebrew (easiest):**
+```bash
+brew install imessage-exporter
+```
+Note: the Homebrew formula may lag slightly behind the latest release.
+
+**Via Cargo (most up-to-date):**
+```bash
+cargo install imessage-exporter
+```
+Requires Rust. If you don't have it: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+
+### Granting Full Disk Access
+
+imessage-exporter needs to read `~/Library/Messages/chat.db`, which is protected by macOS. Before running it, grant Full Disk Access to Terminal (or whichever app you run it from):
+
+**System Settings → Privacy & Security → Full Disk Access → add Terminal**
+
+### Exporting your messages as HTML
+
+Basic export to `~/imessage_export/`:
+```bash
+imessage-exporter -f html -c compatible -o ~/imessage_export
+```
+
+The `-c compatible` flag converts attachments (e.g. HEIC → JPEG) so they render correctly in browsers. Other copy method options are `clone` (no conversion), `full` (converts images, audio, and video), or `disabled` (no attachments).
+
+### How imessage-exporter names its output files
+
+By design, imessage-exporter names each HTML file after the raw identifier(s) from its database — phone numbers, email addresses, or internal chat IDs — rather than contact names. This guarantees uniqueness across exports but makes the files hard to navigate. For example:
+
+```
++14155551212.html
++14155551212, alice@example.com.html
+68afba - 1012.html
+32592.html
+```
+
+Group chat files with a custom name set in the Messages app are exported with that name, followed by a numeric suffix:
+
+```
+Belize! - 769.html
+Da lit fam - 2328.html
+```
+
+`rename_imessage_threads.py` picks up where imessage-exporter leaves off: it renames the raw-identifier files to the names of the participants found inside the HTML, while leaving the already-named files untouched.
+
+---
+
 ## Requirements
 
 - Python 3.10+
