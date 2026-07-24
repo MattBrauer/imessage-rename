@@ -34,10 +34,10 @@ imessage-exporter needs to read `~/Library/Messages/chat.db`, which is protected
 
 Basic export to `~/imessage_export/`:
 ```bash
-imessage-exporter -f html -c compatible -o ~/imessage_export
+imessage-exporter -f html -c basic -o ~/imessage_export
 ```
 
-The `-c compatible` flag converts attachments (e.g. HEIC → JPEG) so they render correctly in browsers. Other copy method options are `clone` (no conversion), `full` (converts images, audio, and video), or `disabled` (no attachments).
+The `-c basic` flag converts attachments (e.g. HEIC → JPEG) so they render correctly in browsers. Other copy method options are `clone` (no conversion), `full` (converts images, audio, and video), or `disabled` (no attachments).
 
 ### How imessage-exporter names its output files
 
