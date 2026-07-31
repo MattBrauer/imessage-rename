@@ -7,22 +7,36 @@ participants other than yourself — but ONLY when the filename still has the
 default phone-number / email-address format produced by imessage-exporter.
 Files that already have a human-readable name are left untouched.
 
+Also supports archiving stale threads: files whose last message is not more
+recent than a given date are moved into an archive folder, leaving all other
+threads in place.
+
 Usage:
     python rename_imessage_threads.py <directory> [--me <your_name>] [--dry-run]
+    python rename_imessage_threads.py <directory> --archive-before YYYY-MM-DD
 
 Arguments:
-    directory       Path to folder containing imessage-exporter HTML files
-    --me            Your name as it appears in the HTML (default: tries to
-                    auto-detect the most frequent sender across all files)
-    --dry-run       Print what would be renamed without actually doing it
-    --separator     Separator between names for group chats (default: ", ")
-    --no-clobber    Skip rename if destination file already exists
+    directory           Path to folder containing imessage-exporter HTML files
+    --me                Your name as it appears in the HTML (default: tries to
+                        auto-detect the most frequent sender across all files)
+    --dry-run           Print what would be renamed/archived without actually
+                        doing it
+    --separator         Separator between names for group chats (default: ", ")
+    --no-clobber        Skip rename/archive if destination file already exists
+    --archive-before    Move threads with no message after this date
+                        (YYYY-MM-DD) into an archive folder
+    --archive-dir       Folder to move archived threads into
+                        (default: <directory>/Archive)
+    --archive-only      Skip renaming; only perform archiving (requires
+                        --archive-before)
 """
 
 import argparse
 import re
+import shutil
 import sys
 from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -279,6 +293,114 @@ def rename_files(
 
 
 # ---------------------------------------------------------------------------
+# Last-message-date parsing
+# ---------------------------------------------------------------------------
+
+# imessage-exporter timestamp format, e.g. "Mar 03, 2018  1:00:53 AM"
+# (note: a single-digit hour is padded with an extra space, which
+# datetime.strptime handles fine since whitespace in the format string
+# matches any run of whitespace in the input).
+_TIMESTAMP_FORMAT = "%b %d, %Y %I:%M:%S %p"
+
+
+def parse_timestamp(text: str) -> datetime | None:
+    """Parse a single imessage-exporter timestamp string, or None if invalid."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, _TIMESTAMP_FORMAT)
+    except ValueError:
+        return None
+
+
+def last_message_datetime(soup: BeautifulSoup) -> datetime | None:
+    """
+    Return the timestamp of the most recent message in the thread, or None
+    if no parseable timestamp is found.
+
+    Each real message's timestamp lives in a <span class="timestamp"><a>...
+    </a></span> element that links back into the Messages app. Edit-history
+    and tapback timestamps either have no <a> child or aren't valid dates, so
+    selecting "span.timestamp > a" naturally skips them.
+    """
+    timestamps = []
+    for a_tag in soup.select("span.timestamp > a"):
+        dt = parse_timestamp(a_tag.get_text())
+        if dt:
+            timestamps.append(dt)
+    return max(timestamps) if timestamps else None
+
+
+def load_last_message_datetime(path: Path) -> datetime | None:
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        soup = BeautifulSoup(fh, "html.parser")
+    return last_message_datetime(soup)
+
+
+# ---------------------------------------------------------------------------
+# Core archive logic
+# ---------------------------------------------------------------------------
+
+def archive_stale_threads(
+    directory: Path,
+    cutoff: date,
+    archive_dir: Path,
+    dry_run: bool = False,
+    no_clobber: bool = False,
+) -> None:
+    """
+    Move every thread whose last message is not after `cutoff` into
+    `archive_dir`. Threads with at least one message after `cutoff`, and
+    threads with no parseable timestamp, are left in place.
+    """
+    html_files = sorted(directory.glob("*.html"))
+    if not html_files:
+        print(f"No HTML files found in {directory}")
+        return
+
+    print(
+        f"Archiving threads with no messages after {cutoff.isoformat()} "
+        f"→ {archive_dir}\n"
+    )
+
+    if not dry_run:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in html_files:
+        try:
+            last_dt = load_last_message_datetime(path)
+        except Exception as exc:
+            print(f"  [ERROR] Could not parse {path.name}: {exc}")
+            continue
+
+        if last_dt is None:
+            print(f"  [SKIP]  {path.name} — no parseable message timestamps found")
+            continue
+
+        if last_dt.date() > cutoff:
+            print(f"  [KEEP]  {path.name} — last message {last_dt.date().isoformat()}")
+            continue
+
+        dst = archive_dir / path.name
+        if no_clobber and dst.exists():
+            print(f"  [SKIP]  {path.name} → {archive_dir.name}/  (destination exists)")
+            continue
+
+        if dry_run:
+            print(
+                f"  [DRY]   {path.name} — last message {last_dt.date().isoformat()} "
+                f"→ {archive_dir.name}/"
+            )
+        else:
+            shutil.move(str(path), str(dst))
+            print(
+                f"  [OK]    {path.name} — last message {last_dt.date().isoformat()} "
+                f"→ {archive_dir.name}/"
+            )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -305,35 +427,69 @@ def main() -> None:
     parser.add_argument(
         "--no-clobber",
         action="store_true",
-        help="Skip rename if the destination filename already exists",
+        help="Skip rename/archive if the destination filename already exists",
+    )
+    parser.add_argument(
+        "--archive-before",
+        metavar="YYYY-MM-DD",
+        type=date.fromisoformat,
+        default=None,
+        help="Move threads with no message after this date into an archive folder",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="Folder to move archived threads into (default: <directory>/Archive)",
+    )
+    parser.add_argument(
+        "--archive-only",
+        action="store_true",
+        help="Skip renaming; only perform archiving (requires --archive-before)",
     )
     args = parser.parse_args()
 
     if not args.directory.is_dir():
         sys.exit(f"Error: '{args.directory}' is not a directory.")
 
+    if args.archive_only and args.archive_before is None:
+        sys.exit("Error: --archive-only requires --archive-before to be set.")
+
     html_files = sorted(args.directory.glob("*.html"))
     if not html_files:
         sys.exit(f"No HTML files found in '{args.directory}'.")
 
-    me = args.me
-    if me is None:
-        print("Auto-detecting your name from message history…")
-        me = detect_self(html_files)
+    if not args.archive_only:
+        me = args.me
         if me is None:
-            sys.exit(
-                "Could not auto-detect your name. "
-                "Please supply it with --me 'Your Name'."
-            )
-        print(f"Detected self as: '{me}'\n")
+            print("Auto-detecting your name from message history…")
+            me = detect_self(html_files)
+            if me is None:
+                sys.exit(
+                    "Could not auto-detect your name. "
+                    "Please supply it with --me 'Your Name'."
+                )
+            print(f"Detected self as: '{me}'\n")
 
-    rename_files(
-        directory=args.directory,
-        me=me,
-        separator=args.separator,
-        dry_run=args.dry_run,
-        no_clobber=args.no_clobber,
-    )
+        rename_files(
+            directory=args.directory,
+            me=me,
+            separator=args.separator,
+            dry_run=args.dry_run,
+            no_clobber=args.no_clobber,
+        )
+
+    if args.archive_before is not None:
+        if not args.archive_only:
+            print()  # blank line between rename and archive output
+        archive_dir = args.archive_dir or (args.directory / "Archive")
+        archive_stale_threads(
+            directory=args.directory,
+            cutoff=args.archive_before,
+            archive_dir=archive_dir,
+            dry_run=args.dry_run,
+            no_clobber=args.no_clobber,
+        )
 
 
 if __name__ == "__main__":

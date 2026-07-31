@@ -4,6 +4,8 @@ Renames HTML files exported by [imessage-exporter](https://github.com/ReagentX/i
 
 Files that already have a human-readable name (e.g. `Belize! - 769.html`, `Da lit fam - 2327.html`) are left untouched.
 
+It can also archive stale threads: threads with no message after a given date are moved into an archive folder, leaving everything else in place.
+
 ---
 
 ## Prerequisites: imessage-exporter
@@ -86,7 +88,10 @@ python rename_imessage_threads.py <directory> [options]
 | `--me <name>` | Your name as it appears in the HTML. Auto-detected if omitted. |
 | `--dry-run` | Preview what would be renamed without touching the filesystem |
 | `--separator <str>` | Separator between names in group chat filenames (default: `", "`) |
-| `--no-clobber` | Skip a rename if the destination filename already exists |
+| `--no-clobber` | Skip a rename/archive if the destination filename already exists |
+| `--archive-before YYYY-MM-DD` | Move threads with no message after this date into an archive folder |
+| `--archive-dir <path>` | Folder to move archived threads into (default: `<directory>/Archive`) |
+| `--archive-only` | Skip renaming; only archive (requires `--archive-before`) |
 
 ### Examples
 
@@ -105,6 +110,15 @@ python rename_imessage_threads.py ~/imessage_export/ --me "Me" --separator " & "
 
 # Don't overwrite if a destination file already exists
 python rename_imessage_threads.py ~/imessage_export/ --no-clobber
+
+# Rename, then archive threads with no message after Jan 1, 2025
+python rename_imessage_threads.py ~/imessage_export/ --archive-before 2025-01-01
+
+# Only archive (skip renaming), previewing first
+python rename_imessage_threads.py ~/imessage_export/ --archive-only --archive-before 2025-01-01 --dry-run
+
+# Archive into a custom folder
+python rename_imessage_threads.py ~/imessage_export/ --archive-only --archive-before 2025-01-01 --archive-dir ~/imessage_archive
 ```
 
 ---
@@ -148,6 +162,14 @@ If `--me` is not supplied, the script scans all files and looks for the sender l
 
 If two default-named files resolve to the same participant name (e.g. two separate threads with the same contact), the script appends a counter: `Alice.html`, `Alice (2).html`.
 
+### Archiving
+
+Each message's timestamp is read from the `<span class="timestamp"><a>...</a></span>` element imessage-exporter writes into every message. The script takes the latest timestamp in the file as the thread's last-message date and compares its *date* (not time) to `--archive-before`. Threads with no message after that date are moved into the archive folder; everything else is left where it is.
+
+Threads with no parseable timestamp (e.g. system-only threads with no real messages) are left in place and reported as `[SKIP]`, since there's no date to judge them by.
+
+The archive folder itself is never scanned as a source, so re-running the command is safe and won't try to re-archive already-archived threads.
+
 ---
 
 ## Output
@@ -156,8 +178,9 @@ The script prints one line per file:
 
 | Tag | Meaning |
 |---|---|
-| `[OK]` | File successfully renamed |
-| `[DRY]` | Would rename (dry-run mode) |
-| `[SKIP]` | Already named, or destination exists (`--no-clobber`) |
+| `[OK]` | File successfully renamed or archived |
+| `[DRY]` | Would rename/archive (dry-run mode) |
+| `[SKIP]` | Already named, destination exists (`--no-clobber`), or no timestamp to archive by |
 | `[SAME]` | New name matches old name, no action needed |
+| `[KEEP]` | Thread has a message after `--archive-before`, left in place |
 | `[ERROR]` | File could not be parsed |
