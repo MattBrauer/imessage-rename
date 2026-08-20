@@ -7,6 +7,12 @@ participants other than yourself — but ONLY when the filename still has the
 default phone-number / email-address format produced by imessage-exporter.
 Files that already have a human-readable name are left untouched.
 
+Group chats sometimes show a participant as a raw phone number/email instead
+of a resolved name, even though that same identity resolves fine in a 1:1
+thread elsewhere. By default, names learned from single-participant threads
+are used to disambiguate those raw identities in group chats (disable with
+--no-disambiguate).
+
 Also supports archiving stale threads: files whose last message is not more
 recent than a given date are moved into an archive folder, leaving all other
 threads in place.
@@ -29,6 +35,8 @@ Arguments:
                         (default: <directory>/Archive)
     --archive-only      Skip renaming; only perform archiving (requires
                         --archive-before)
+    --no-disambiguate   Don't disambiguate raw group-chat identities using
+                        names resolved in single-participant threads
 """
 
 import argparse
@@ -72,6 +80,30 @@ _AND_OTHERS_RE = re.compile(r",\s*and \d+ others$", re.IGNORECASE)
 _TRAILING_COMMA_RE = re.compile(r",\s*$")
 
 
+def _looks_like_raw_identifier(text: str) -> bool:
+    """Return True if `text` is a raw phone number or email, not a resolved name."""
+    text = text.strip()
+    return bool(
+        _PHONE_E164_RE.match(text)
+        or _PHONE_10D_RE.match(text)
+        or _EMAIL_RE.match(text)
+    )
+
+
+def normalize_identifier(ident: str) -> str:
+    """
+    Normalize a phone number or email so the same identity compares equal
+    regardless of formatting (e.g. "+1 (650) 200-0667" == "+16502000667").
+    """
+    ident = ident.strip()
+    if _EMAIL_RE.match(ident):
+        return ident.lower()
+    digits = re.sub(r"\D", "", ident)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]  # strip US/Canada country code for comparison
+    return digits
+
+
 def _token_is_default(token: str) -> bool:
     """Return True if a single comma-split token looks like a default identifier."""
     token = token.strip()
@@ -84,6 +116,15 @@ def _token_is_default(token: str) -> bool:
         or _DIGIT_BLOB_RE.match(token)
         or _EMAIL_RE.match(token)
     )
+
+
+def _split_stem_tokens(stem: str) -> list[str]:
+    """Split a filename stem into its comma-separated identity tokens."""
+    # Strip "and N others" trailer from truncated group chats
+    stem_clean = _AND_OTHERS_RE.sub("", stem)
+    # Strip trailing comma left by truncation
+    stem_clean = _TRAILING_COMMA_RE.sub("", stem_clean)
+    return [t.strip() for t in stem_clean.split(",")]
 
 
 def filename_is_default(stem: str) -> bool:
@@ -113,29 +154,49 @@ def filename_is_default(stem: str) -> bool:
     if _INTERNAL_ID_RE.match(stem):
         return True
 
-    # Strip "and N others" trailer from truncated group chats
-    stem_clean = _AND_OTHERS_RE.sub("", stem)
-    # Strip trailing comma left by truncation
-    stem_clean = _TRAILING_COMMA_RE.sub("", stem_clean)
-
-    tokens = [t.strip() for t in stem_clean.split(",")]
+    tokens = _split_stem_tokens(stem)
     if not tokens:
         return False
 
     return all(_token_is_default(t) for t in tokens)
 
 
+def filename_has_raw_identifier(stem: str) -> bool:
+    """
+    Return True when at least one comma-separated token in the filename is
+    still a raw phone number or email address — e.g. a partially-resolved
+    group filename like "Jen Murphy, +15305597313" left over from a previous
+    rename that couldn't identify every participant at the time.
+
+    Such filenames are already "named" as far as filename_is_default is
+    concerned, but are worth reconsidering once identity disambiguation can
+    fill in the missing name.
+    """
+    if _INTERNAL_ID_RE.match(stem):
+        return False
+    return any(_looks_like_raw_identifier(t) for t in _split_stem_tokens(stem))
+
+
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
-def extract_participants(soup: BeautifulSoup) -> list[str]:
+def extract_participants(
+    soup: BeautifulSoup,
+    identity_map: dict[str, str] | None = None,
+) -> list[str]:
     """
     Pull unique sender names from the HTML produced by imessage-exporter.
 
     imessage-exporter renders each message inside a <div class="message">
     block. The sender name appears in a <span class="sender"> element.
     For sent messages, the sender is typically "Me" or your actual name.
+
+    In group chats, imessage-exporter sometimes can't resolve a participant
+    to a contact name and shows their raw phone number/email instead, even
+    though that same identity resolves fine in a 1:1 thread. If `identity_map`
+    is supplied (see build_identity_map), raw identifiers are swapped for
+    their disambiguated name.
     """
     names: list[str] = []
     seen: set[str] = set()
@@ -143,6 +204,8 @@ def extract_participants(soup: BeautifulSoup) -> list[str]:
     # Primary strategy: <span class="sender">Name</span>
     for span in soup.select("span.sender"):
         name = span.get_text(strip=True)
+        if name and identity_map and _looks_like_raw_identifier(name):
+            name = identity_map.get(normalize_identifier(name), name)
         if name and name not in seen:
             seen.add(name)
             names.append(name)
@@ -165,10 +228,59 @@ def extract_participants(soup: BeautifulSoup) -> list[str]:
     return names
 
 
-def load_participants_from_file(path: Path) -> list[str]:
+def load_participants_from_file(
+    path: Path,
+    identity_map: dict[str, str] | None = None,
+) -> list[str]:
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         soup = BeautifulSoup(fh, "html.parser")
-    return extract_participants(soup)
+    return extract_participants(soup, identity_map)
+
+
+# ---------------------------------------------------------------------------
+# Identity disambiguation
+# ---------------------------------------------------------------------------
+
+def build_identity_map(html_files: list[Path], me: str) -> dict[str, str]:
+    """
+    Build a {normalized identifier: resolved name} map from single-participant
+    threads whose filename is still a raw phone number or email address.
+
+    When imessage-exporter can resolve that thread's other participant to a
+    real contact name, we now know what that phone number/email belongs to.
+    This lets group-chat threads — where the same identity is sometimes shown
+    as a raw phone/email instead of a name — be disambiguated using names
+    already known from 1:1 threads.
+    """
+    identity_map: dict[str, str] = {}
+    for path in html_files:
+        stem = path.stem
+        if "," in stem:
+            continue  # group chat filename, not a clean 1:1 id -> name signal
+
+        if not (
+            _PHONE_E164_RE.match(stem)
+            or _PHONE_10D_RE.match(stem)
+            or _EMAIL_RE.match(stem)
+        ):
+            continue  # filename isn't itself a raw phone/email identifier
+
+        try:
+            participants = load_participants_from_file(path)
+        except Exception:
+            continue
+
+        others = [p for p in participants if p != me]
+        if len(others) != 1:
+            continue
+
+        name = others[0]
+        if not name or _looks_like_raw_identifier(name):
+            continue  # unresolved here too — nothing to disambiguate with
+
+        identity_map[normalize_identifier(stem)] = name
+
+    return identity_map
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +344,7 @@ def rename_files(
     separator: str = ", ",
     dry_run: bool = False,
     no_clobber: bool = False,
+    disambiguate: bool = True,
 ) -> None:
     html_files = sorted(directory.glob("*.html"))
     if not html_files:
@@ -240,17 +353,31 @@ def rename_files(
 
     print(f"Found {len(html_files)} HTML file(s). Self identifier: '{me}'\n")
 
+    identity_map: dict[str, str] = {}
+    if disambiguate:
+        identity_map = build_identity_map(html_files, me)
+        if identity_map:
+            print(
+                f"Disambiguated {len(identity_map)} identifier(s) from "
+                f"single-participant threads\n"
+            )
+
     rename_map: dict[Path, Path] = {}
     stem_counter: Counter = Counter()
 
     for path in html_files:
-        # Only rename files still using the default phone/email filename format
-        if not filename_is_default(path.stem):
+        # Rename files still using the default phone/email filename format, and
+        # also reconsider partially-resolved filenames (e.g. "Jen Murphy,
+        # +15305597313") when disambiguation might be able to fill in the rest.
+        eligible = filename_is_default(path.stem)
+        if not eligible and identity_map and filename_has_raw_identifier(path.stem):
+            eligible = True
+        if not eligible:
             print(f"  [SKIP]  {path.name} — already named, leaving untouched")
             continue
 
         try:
-            participants = load_participants_from_file(path)
+            participants = load_participants_from_file(path, identity_map)
         except Exception as exc:
             print(f"  [ERROR] Could not parse {path.name}: {exc}")
             continue
@@ -447,6 +574,14 @@ def main() -> None:
         action="store_true",
         help="Skip renaming; only perform archiving (requires --archive-before)",
     )
+    parser.add_argument(
+        "--no-disambiguate",
+        action="store_true",
+        help=(
+            "Don't use names resolved in single-participant threads to "
+            "disambiguate raw phone/email identities shown in group chats"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.directory.is_dir():
@@ -477,6 +612,7 @@ def main() -> None:
             separator=args.separator,
             dry_run=args.dry_run,
             no_clobber=args.no_clobber,
+            disambiguate=not args.no_disambiguate,
         )
 
     if args.archive_before is not None:

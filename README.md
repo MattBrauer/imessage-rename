@@ -4,6 +4,8 @@ Renames HTML files exported by [imessage-exporter](https://github.com/ReagentX/i
 
 Files that already have a human-readable name (e.g. `Belize! - 769.html`, `Da lit fam - 2327.html`) are left untouched.
 
+Group chats sometimes show a participant as a raw phone number or email instead of a resolved name, even though that same identity resolves fine in a 1:1 thread elsewhere. By default, the script learns identities from single-participant threads and uses them to disambiguate raw identities in group chats — including fixing up already-renamed, partially-resolved filenames like `Jen Murphy, +15305597313.html`.
+
 It can also archive stale threads: threads with no message after a given date are moved into an archive folder, leaving everything else in place.
 
 ---
@@ -92,6 +94,7 @@ python rename_imessage_threads.py <directory> [options]
 | `--archive-before YYYY-MM-DD` | Move threads with no message after this date into an archive folder |
 | `--archive-dir <path>` | Folder to move archived threads into (default: `<directory>/Archive`) |
 | `--archive-only` | Skip renaming; only archive (requires `--archive-before`) |
+| `--no-disambiguate` | Don't use names resolved in single-participant threads to disambiguate raw identities in group chats |
 
 ### Examples
 
@@ -161,6 +164,16 @@ If `--me` is not supplied, the script scans all files and looks for the sender l
 ### Collision handling
 
 If two default-named files resolve to the same participant name (e.g. two separate threads with the same contact), the script appends a counter: `Alice.html`, `Alice (2).html`.
+
+### Identity disambiguation
+
+imessage-exporter resolves each participant to a contact name independently per thread, and sometimes fails to resolve a handle in a group chat even though the same handle resolves fine in a 1:1 thread. This shows up as a group participant appearing as a raw phone number or email — e.g. `span.sender` containing `+15305597313` — instead of a name.
+
+To fix this, the script first scans every single-participant thread whose filename is still a raw phone number or email (e.g. `+15305597313.html`). If that thread's content resolves the other participant to a real name (say, "Priya Patel"), the script now knows `+15305597313` → "Priya Patel". It then applies that mapping wherever the same raw identifier shows up as a sender in a group chat.
+
+This also lets the script go back and fix filenames a previous run left partially resolved, since a mixed filename like `Jen Murphy, +15305597313.html` is reconsidered — and renamed to `Jen Murphy, Priya Patel.html` — once disambiguation has an answer for the leftover identifier. Filenames that are still fully unresolved (e.g. plain `+15305597313.html`) are unaffected by this — they're already eligible for renaming on their own.
+
+This only works when a matching single-participant thread with a resolved name exists in the same directory (and hasn't itself already been renamed away from its raw-identifier filename in an earlier run — once a 1:1 thread is renamed, the raw identifier is no longer recoverable from its filename). Disable it with `--no-disambiguate` if you'd rather every thread keep its own independent resolution.
 
 ### Archiving
 
